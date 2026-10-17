@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EA FC 27 — Bingo Overlay & Moderator Hub</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script src="https://github.com/tmijs/tmi.js/releases/download/v1.8.5/tmi.min.js"></script>
+<style>
+  :root {
+    --bg-dark: #090d16;
+    --bg-card: rgba(15, 23, 42, 0.94);
+    --border: #334155;
+    --neon-green: #00ff87;
+    --neon-red: #ff2a5f;
+    --neon-gold: #fbbf24;
+    --neon-purple: #c084fc;
+    --neon-blue: #38bdf8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; user-select: none; }
+  body { background: transparent; color: #f8fafc; padding: 16px; }
+  body.hub-mode { background: var(--bg-dark); min-height: 100vh; }
+
+  /* ==================== ОВЕРЛЕЙ ДЛЯ OBS ==================== */
+  .overlay-container {
+    width: 430px;
+    background: var(--bg-card);
+    border: 2px solid var(--border);
+    border-radius: 18px;
+    padding: 16px;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.75);
+  }
+  body.hub-mode .overlay-container { display: none; }
+
+  .header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid #1e293b;
+  }
+  .title { font-size: 18px; font-weight: 900; color: var(--neon-green); text-transform: uppercase; }
+  .subtitle { font-size: 12px; color: #94a3b8; font-weight: 600; }
+  .mode-badge {
+    background: #1e293b; border: 1px solid #475569; padding: 5px 10px;
+    border-radius: 8px; font-size: 12px; font-weight: 800; color: var(--neon-blue);
+  }
+
+  .board-layout {
+    display: grid;
+    grid-template-columns: 28px repeat(3, 1fr);
+    grid-template-rows: 24px repeat(3, 105px);
+    gap: 8px;
+  }
+  .line-label {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 900; color: #64748b;
+    background: rgba(30, 41, 59, 0.7); border-radius: 6px;
+  }
+  .line-label.won { background: var(--neon-gold); color: #090d16; box-shadow: 0 0 12px var(--neon-gold); }
+  .line-label.dead { color: #ef4444; text-decoration: line-through; opacity: 0.45; }
+
+  .cell {
+    background: #1e293b; border: 2px solid #334155; border-radius: 12px;
+    padding: 8px; display: flex; flex-direction: column; justify-content: space-between;
+    position: relative; transition: all 0.25s ease; overflow: hidden;
+  }
+  .cell-top { display: flex; justify-content: space-between; font-size: 11px; font-weight: 800; color: #94a3b8; }
+  .cell-num { background: #0f172a; padding: 2px 6px; border-radius: 5px; color: var(--neon-blue); }
+  .cell-task { font-size: 12.5px; font-weight: 700; text-align: center; line-height: 1.25; margin: auto 0; }
+  .cell-footer { font-size: 10px; font-weight: 800; text-align: center; min-height: 14px; }
+
+  .cell.done { background: rgba(0, 255, 135, 0.18); border-color: var(--neon-green); }
+  .cell.done .cell-task { color: var(--neon-green); }
+  .cell.clutch { background: rgba(255, 42, 95, 0.22); border-color: var(--neon-red); animation: pulseRed 0.6s infinite alternate; }
+  .cell.clutch .cell-footer { color: #fda4af; font-size: 11px; }
+  .cell.burned { background: rgba(69, 10, 10, 0.85); border-color: #7f1d1d; opacity: 0.65; }
+  .cell.burned .cell-task { text-decoration: line-through; color: #f87171; }
+  .cell.burned::after {
+    content: "✖ СГОРЕЛА"; position: absolute; inset: 0; background: rgba(15, 23, 42, 0.78);
+    color: var(--neon-red); font-weight: 900; font-size: 14px; display: flex;
+    align-items: center; justify-content: center; transform: rotate(-12deg);
+  }
+  .cell.hardcore { border-color: var(--neon-purple); background: rgba(168, 85, 247, 0.18); }
+  .cell.highlight-spin { border-color: var(--neon-gold); box-shadow: 0 0 20px var(--neon-gold); transform: scale(1.05); }
+
+  @keyframes pulseRed {
+    from { box-shadow: 0 0 6px var(--neon-red); }
+    to { box-shadow: 0 0 20px var(--neon-red); }
+  }
+
+  .status-bar {
+    margin-top: 12px; background: #0f172a; border: 1px solid #334155;
+    border-radius: 10px; padding: 10px 12px; display: flex;
+    justify-content: space-between; font-size: 12px;
+  }
+  .status-winner { font-weight: 800; color: var(--neon-gold); }
+
+  /* ==================== ХАБ МОДЕРАТОРА ==================== */
+  .hub-wrapper {
+    display: none; max-width: 1100px; margin: 0 auto;
+    grid-template-columns: 1.35fr 1fr; gap: 20px;
+  }
+  body.hub-mode .hub-wrapper { display: grid; }
+  @media (max-width: 860px) { .hub-wrapper { grid-template-columns: 1fr; } }
+
+  .hub-card {
+    background: #0f172a; border: 1px solid #334155;
+    border-radius: 16px; padding: 20px; margin-bottom: 16px;
+  }
+  .hub-card h2 {
+    font-size: 15px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--neon-blue); margin-bottom: 14px; display: flex;
+    justify-content: space-between; align-items: center;
+  }
+  .conn-dot { font-size: 12px; padding: 4px 10px; border-radius: 20px; background: #1e293b; color: #94a3b8; }
+  .conn-dot.online { background: rgba(0,255,135,0.15); color: var(--neon-green); }
+
+  /* Сетка карточек в Хабе */
+  .hub-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+  }
+  .hub-cell {
+    background: #1e293b; border: 2px solid #334155; border-radius: 12px;
+    padding: 12px; display: flex; flex-direction: column; justify-content: space-between;
+    min-height: 150px; transition: 0.2s;
+  }
+  .hub-cell.done { border-color: var(--neon-green); background: rgba(0, 255, 135, 0.12); }
+  .hub-cell.clutch { border-color: var(--neon-red); background: rgba(255, 42, 95, 0.18); }
+  .hub-cell.burned { border-color: #7f1d1d; opacity: 0.6; }
+  .hub-cell.hardcore { border-color: var(--neon-purple); }
+
+  .hub-cell-head { display: flex; justify-content: space-between; font-size: 12px; font-weight: 800; color: #94a3b8; }
+  .hub-cell-task { font-size: 14px; font-weight: 700; text-align: center; margin: 10px 0; color: #fff; }
+  .hub-cell-actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+
+  .btn {
+    background: #334155; border: 1px solid #475569; color: #fff;
+    padding: 8px 12px; border-radius: 8px; font-weight: 700;
+    font-size: 12px; cursor: pointer; transition: 0.15s; text-align: center;
+  }
+  .btn:hover { filter: brightness(1.15); }
+  .btn:active { transform: scale(0.97); }
+  .btn-sm { padding: 6px 4px; font-size: 11px; }
+  .btn-green { background: var(--neon-green); color: #090d16; border: none; font-weight: 900; }
+  .btn-red { background: var(--neon-red); color: #fff; border: none; }
+  .btn-amber { background: #f59e0b; color: #090d16; border: none; font-weight: 800; }
+  .btn-purple { background: #9333ea; color: #fff; border: none; }
+
+  .launch-bar { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
+  
+  /* Сетка 10 исходов Twitch Prediction */
+  .outcomes-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+  .outcome-btn {
+    background: #1e293b; border: 2px solid #334155; color: #e2e8f0;
+    padding: 10px; border-radius: 10px; font-weight: 700; font-size: 12px;
+    cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+  }
+  .outcome-btn:hover { border-color: var(--neon-blue); }
+  .outcome-btn.recommended {
+    border-color: var(--neon-gold); background: rgba(251, 191, 36, 0.15);
+    color: var(--neon-gold);
+  }
+
+  .key-input-row { display: flex; gap: 8px; margin-bottom: 14px; }
+  .input-box {
+    flex: 1; background: #1e293b; border: 1px solid #475569; color: #fff;
+    padding: 8px 12px; border-radius: 8px; font-size: 13px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ==================== 1. БЛОК ОВЕРЛЕЯ (ДЛЯ OBS) ==================== -->
+<div class="overlay-container">
+  <div class="header">
+    <div>
+      <div class="title">⚽ FC 27 LIVE BINGO</div>
+      <div class="subtitle" id="ovSubStatus">Чат против Стримера</div>
+    </div>
+    <div class="mode-badge" id="ovModeBadge">3 МАТЧА</div>
+  </div>
+  <div class="board-layout" id="ovBoardLayout"></div>
+  <div class="status-bar">
+    <span>Лидер ставки Twitch:</span>
+    <span class="status-winner" id="ovPredLeader">💀 РУИН (0 линий)</span>
+  </div>
+</div>
+
+<!-- ==================== 2. ПУЛЬТ-ХАБ МОДЕРАТОРА ==================== -->
+<div class="hub-wrapper">
+  <!-- Левая колонка: Живая доска 3x3 с кнопками на каждой клетке -->
+  <div>
+    <div class="hub-card">
+      <h2>
+        <span>🎮 Живая доска Бинго (<span id="hubModeTitle">3 МАТЧА</span>)</span>
+        <span class="conn-dot" id="syncStatus">⏳ Подключение...</span>
+      </h2>
+      <div class="hub-grid" id="hubGrid"></div>
+    </div>
+
+    <div class="hub-card">
+      <h2><span>🎲 Спец-действия на доске</span></h2>
+      <div style="display:flex; gap:10px;">
+        <button class="btn btn-purple" style="flex:1; padding:12px;" onclick="sendCmd('reroll')">
+          🎰 Крутануть Слепой Реролл (45% шанс Хардкора)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Правая колонка: Запуск Бинго и Управление Ставкой Twitch -->
+  <div>
+    <div class="hub-card">
+      <h2><span>🔑 Ключ синхронизации с OBS</span></h2>
+      <div class="key-input-row">
+        <input type="text" id="roomKeyInput" class="input-box" placeholder="Секретный ключ комнаты (например: fc27_secret)">
+        <button class="btn btn-green" onclick="ApplyRoomKey()">Подключить</button>
+      </div>
+      <div style="font-size:11px; color:#94a3b8;">
+        Ссылка для OBS стримера: <code id="obsUrlHint" style="color:#38bdf8; user-select:all;"></code>
+      </div>
+    </div>
+
+    <div class="hub-card">
+      <h2><span>🚀 1. Создать новое Бинго (+ Авто-ставка Twitch)</span></h2>
+      <div class="launch-bar">
+        <button class="btn btn-green" onclick="sendCmd('start', {mode: '1 МАТЧ'})">🚀 На 1 Матч</button>
+        <button class="btn btn-green" onclick="sendCmd('start', {mode: '3 МАТЧА'})">🚀 На 3 Матча</button>
+        <button class="btn btn-green" onclick="sendCmd('start', {mode: 'ВСЯ WL'})">🚀 На Всю WL</button>
+      </div>
+      <div style="font-size:11px; color:#94a3b8;">
+        При нажатии доска в OBS обновится, а Streamer.bot сам откроет ставку Twitch на 10 исходов.
+      </div>
+    </div>
+
+    <div class="hub-card">
+      <h2><span>🏆 2. Завершить ставку Twitch (Выплата баллов)</span></h2>
+      <button class="btn btn-amber" style="width:100%; padding:12px; margin-bottom:12px; font-size:14px;" onclick="resolveRecommended()">
+        ⚡ Авто-выплата лидеру: <span id="hubAutoWinner">💀 РУИН (0 линий)</span>
+      </button>
+
+      <div style="font-size:12px; color:#94a3b8; margin-bottom:6px;">Или выбери победивший исход вручную:</div>
+      <div class="outcomes-grid" id="outcomesGrid"></div>
+
+      <button class="btn btn-red" style="width:100%; margin-top:12px; padding:10px;" onclick="sendCmd('cancel_pred')">
+        🚫 Отменить ставку (Вернуть баллы всем зрителям)
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ================= ПАРАМЕТРЫ И РЕЖИМ (OVERLAY vs HUB) =================
+  const params = new URLSearchParams(window.location.search);
+  const IS_OVERLAY = params.get('mode') === 'overlay';
+  let ROOM_KEY = params.get('key') || localStorage.getItem('fc27_bingo_key') || 'fc27_default_room';
+  const TWITCH_CHANNEL = params.get('channel') || '';
+  const CLUTCH_SECONDS = 300; // 5 минут на Клатч-вызов
+
+  if (!IS_OVERLAY) {
+    document.body.classList.add('hub-mode');
+    document.getElementById('roomKeyInput').value = ROOM_KEY;
+    updateObsHint();
+  }
+
+  function updateObsHint() {
+    const baseUrl = window.location.href.split('?')[0];
+    document.getElementById('obsUrlHint').innerText = `${baseUrl}?mode=overlay&key=${ROOM_KEY}&channel=ник_твича`;
+  }
+
+  // ================= ПУЛЫ ЗАДАНИЙ И ЛИНИЙ =================
+  const NORMAL_TASKS = [
+    "Удар в штангу или перекладину", "Забить гол головой", "Рейдж-квит соперника",
+    "Гол из-за пределов штрафной", "Гол на 45' или 90' минуте", "Попался Мбаппе в составе",
+    "Выиграть тайм всухую", "Желтая или красная карточка", "Пауза сразу после гола",
+    "Забить гол защитником", "Назначен пенальти в матче", "Забить с углового",
+    "Гол финессом (R1/RB)", "Гол мощным ударом (PowerShot)", "Отыграться, уступая в счете",
+    "Стример сгорел на пас не туда", "Вратарь потащил выход 1 на 1", "Победа с разницей в 3+ мяча"
+  ];
+
+  const HARDCORE_TASKS = [
+    "💀 Забить прямым со штрафного", "💀 Забить гол вратарем",
+    "💀 Камбэк с 0:2 или 0:3", "💀 Дубль за 5 игровых минут", "💀 Забить парашютиком (L1/LB)"
+  ];
+
+  const PREDICTION_OUTCOMES = [
+    "Линия Г1 (Верх)", "Линия Г2 (Центр)", "Линия Г3 (Низ)",
+    "Линия В1 (Лево)", "Линия В2 (Центр)", "Линия В3 (Право)",
+    "Диагональ Д1 (↘)", "Диагональ Д2 (↗)",
+    "💎 ФУЛЛ-БИНГО (Все 9)", "💀 РУИН (0 линий)"
+  ];
+
+  const LINES_MAP = [
+    { id: 'Г1', idx: 0, cells: [0,1,2] }, { id: 'Г2', idx: 1, cells: [3,4,5] },
+    { id: 'Г3', idx: 2, cells: [6,7,8] }, { id: 'В1', idx: 3, cells: [0,3,6] },
+    { id: 'В2', idx: 4, cells: [1,4,7] }, { id: 'В3', idx: 5, cells: [2,5,8] },
+    { id: 'Д1', idx: 6, cells: [0,4,8] }, { id: 'Д2', idx: 7, cells: [2,4,6] }
+  ];
+
+  let state = { mode: '3 МАТЧА', cells: [], firstLineIdx: null };
+  let clutchIntervals = {};
+
+  // ================= ЗВУКОВОЙ СИНТЕЗАТОР =================
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  function playTone(freq, type, duration, delay = 0) {
+    setTimeout(() => {
+      try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.14, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(); osc.stop(audioCtx.currentTime + duration);
+      } catch(e) {}
+    }, delay);
+  }
+  const sfxComplete = () => { playTone(523, 'sine', 0.15); playTone(659, 'sine', 0.2, 110); playTone(784, 'triangle', 0.3, 220); };
+  const sfxClutch = () => { playTone(440, 'sawtooth', 0.2); playTone(880, 'sawtooth', 0.25, 180); };
+  const sfxBurn = () => { playTone(160, 'sawtooth', 0.35); playTone(95, 'square', 0.45, 140); };
+  const sfxBingo = () => { [523, 659, 783, 1046].forEach((f, i) => playTone(f, 'triangle', 0.28, i * 100)); };
+
+  // ================= ОБЛАЧНАЯ СИНХРОНИЗАЦИЯ (MQTT WEBSOCKET) =================
+  let mqttClient = null;
+  const getTopicState = () => `fc27_bingo_v2/${ROOM_KEY}/state`;
+  const getTopicCmd = () => `fc27_bingo_v2/${ROOM_KEY}/cmd`;
+
+  function connectCloudSync() {
+    if (mqttClient) mqttClient.end();
+    mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
+
+    mqttClient.on('connect', () => {
+      const dot = document.getElementById('syncStatus');
+      if (dot) { dot.innerText = '🟢 Связь с OBS активна'; dot.classList.add('online'); }
+      mqttClient.subscribe(getTopicState());
+      mqttClient.subscribe(getTopicCmd());
+      if (IS_OVERLAY) publishState();
+    });
+
+    mqttClient.on('message', (topic, payload) => {
+      try {
+        const data = JSON.parse(payload.toString());
+        if (topic === getTopicState() && !IS_OVERLAY) {
+          state = data;
+          renderAll();
+        } else if (topic === getTopicCmd()) {
+          handleCommand(data);
+        }
+      } catch (e) {}
+    });
+  }
+
+  function publishState() {
+    if (mqttClient && mqttClient.connected) {
+      mqttClient.publish(getTopicState(), JSON.stringify(state), { retain: true });
+    }
+    renderAll();
+  }
+
+  function sendCmd(type, payload = {}) {
+    const msg = { type, ...payload };
+    if (mqttClient && mqttClient.connected) {
+      mqttClient.publish(getTopicCmd(), JSON.stringify(msg));
+    } else {
+      handleCommand(msg);
+    }
+  }
+
+  function ApplyRoomKey() {
+    const val = document.getElementById('roomKeyInput').value.trim();
+    if (!val) return;
+    ROOM_KEY = val;
+    localStorage.setItem('fc27_bingo_key', ROOM_KEY);
+    updateObsHint();
+    connectCloudSync();
+  }
+
+  // ================= ОБРАБОТКА КОМАНД (НА СТОРОНЕ ОВЕРЛЕЯ) =================
+  function shuffle(arr) { return [...arr].sort(() => Math.random() - 0.5); }
+
+  function handleCommand(cmd) {
+    // Чтобы таймеры и связь со Streamer.bot не дублировались, мастер-логику ведет Оверлей (или Хаб, если открыт один)
+    if (!IS_OVERLAY && cmd.fromOverlay) return;
+
+    if (cmd.type === 'start') {
+      Object.values(clutchIntervals).forEach(clearInterval);
+      clutchIntervals = {};
+      const picked = shuffle(NORMAL_TASKS).slice(0, 9);
+      state.mode = cmd.mode || '3 МАТЧА';
+      state.firstLineIdx = null;
+      state.cells = picked.map((t, i) => ({ id: i + 1, task: t, status: 'open', hardcore: false, timer: 0 }));
+      sfxBingo();
+      publishState();
+      if (IS_OVERLAY) {
+        sendToStreamerBot({ action: 'StartBingoPrediction', mode: state.mode });
+      }
+    }
+    else if (cmd.type === 'toggle') {
+      const cell = state.cells[cmd.idx];
+      if (!cell || cell.status === 'burned') return;
+      if (cell.status === 'clutch') clearInterval(clutchIntervals[cmd.idx]);
+      cell.status = (cell.status === 'done') ? 'open' : 'done';
+      if (cell.status === 'done') sfxComplete();
+      checkLines();
+      publishState();
+    }
+    else if (cmd.type === 'clutch') {
+      const idx = cmd.idx;
+      const cell = state.cells[idx];
+      if (!cell || cell.status === 'done' || cell.status === 'burned') return;
+      cell.status = 'clutch';
+      cell.timer = CLUTCH_SECONDS;
+      sfxClutch();
+      if (clutchIntervals[idx]) clearInterval(clutchIntervals[idx]);
+      clutchIntervals[idx] = setInterval(() => {
+        cell.timer--;
+        if (cell.timer <= 0) {
+          clearInterval(clutchIntervals[idx]);
+          cell.status = 'burned';
+          sfxBurn();
+          checkLines();
+        }
+        publishState();
+      }, 1000);
+      publishState();
+    }
+    else if (cmd.type === 'burn') {
+      const cell = state.cells[cmd.idx];
+      if (!cell) return;
+      if (clutchIntervals[cmd.idx]) clearInterval(clutchIntervals[cmd.idx]);
+      cell.status = (cell.status === 'burned') ? 'open' : 'burned';
+      if (cell.status === 'burned') sfxBurn();
+      checkLines();
+      publishState();
+    }
+    else if (cmd.type === 'edit') {
+      const cell = state.cells[cmd.idx];
+      if (cell && cmd.text) {
+        cell.task = cmd.text;
+        publishState();
+      }
+    }
+    else if (cmd.type === 'reroll') {
+      const openIndices = state.cells.map((c, i) => c.status === 'open' ? i : -1).filter(i => i !== -1);
+      if (!openIndices.length) return;
+      const randIdx = openIndices[Math.floor(Math.random() * openIndices.length)];
+      const isHard = Math.random() < 0.45;
+      const pool = isHard ? HARDCORE_TASKS : NORMAL_TASKS;
+      const used = state.cells.map(c => c.task);
+      const avail = pool.filter(t => !used.includes(t));
+      state.cells[randIdx].task = avail.length ? shuffle(avail)[0] : shuffle(pool)[0];
+      state.cells[randIdx].hardcore = isHard;
+      if (isHard) sfxBurn(); else sfxComplete();
+      publishState();
+    }
+    else if (cmd.type === 'resolve_pred') {
+      const winIdx = cmd.winIdx;
+      const winTitle = PREDICTION_OUTCOMES[winIdx];
+      document.getElementById('ovSubStatus').innerText = `ИТОГ: ${winTitle}`;
+      sfxBingo();
+      if (IS_OVERLAY) {
+        sendToStreamerBot({
+          action: 'ResolveBingoPrediction',
+          winningOutcomeIndex: winIdx,
+          winningOutcomeTitle: winTitle
+        });
+      }
+    }
+    else if (cmd.type === 'cancel_pred') {
+      document.getElementById('ovSubStatus').innerText = `Ставка отменена (Refund)`;
+      if (IS_OVERLAY) {
+        sendToStreamerBot({
+          action: 'ResolveBingoPrediction',
+          winningOutcomeIndex: -1,
+          winningOutcomeTitle: 'Отмена ставки'
+        });
+      }
+    }
+  }
+
+  function checkLines() {
+    for (const line of LINES_MAP) {
+      const isWon = line.cells.every(i => state.cells[i]?.status === 'done');
+      if (isWon && state.firstLineIdx === null) {
+        state.firstLineIdx = line.idx;
+        sfxBingo();
+      }
+    }
+  }
+
+  function getWinningOutcomeIndex() {
+    if (!state.cells.length) return 9;
+    const allDone = state.cells.every(c => c.status === 'done');
+    if (allDone) return 8; // 💎 ФУЛЛ-БИНГО
+    if (state.firstLineIdx !== null) return state.firstLineIdx;
+    return 9; // 💀 РУИН
+  }
+
+  function editCellPrompt(idx) {
+    const current = state.cells[idx]?.task || '';
+    const next = prompt(`Новое задание для клетки #${idx + 1}:`, current);
+    if (next && next.trim()) {
+      sendCmd('edit', { idx, text: next.trim() });
+    }
+  }
+
+  function resolveRecommended() {
+    const winIdx = getWinningOutcomeIndex();
+    sendCmd('resolve_pred', { winIdx });
+  }
+
+  // ================= ОТРИСОВКА ОВЕРЛЕЯ И ХАБА =================
+  function formatTime(sec) {
+    const m = Math.floor(sec / 60).toString().padStart(2, '0');
+    const s = (sec % 60).toString().padStart(2, '0');
+    return `🔥 ${m}:${s}`;
+  }
+
+  function renderAll() {
+    if (!state.cells || !state.cells.length) return;
+    const winIdx = getWinningOutcomeIndex();
+    const winTitle = PREDICTION_OUTCOMES[winIdx];
+
+    // 1. Рендер Оверлея
+    document.getElementById('ovModeBadge').innerText = state.mode;
+    document.getElementById('ovPredLeader').innerText = winTitle;
+    const ovLayout = document.getElementById('ovBoardLayout');
+    ovLayout.innerHTML = '';
+
+    const topHeaders = [
+      { id: 'Д1', cells: [0,4,8] }, { id: 'В1', cells: [0,3,6] },
+      { id: 'В2', cells: [1,4,7] }, { id: 'В3', cells: [2,5,8] }
+    ];
+    topHeaders.forEach(h => {
+      const div = document.createElement('div');
+      const isDead = h.cells.some(i => state.cells[i]?.status === 'burned');
+      const isWon = h.cells.every(i => state.cells[i]?.status === 'done');
+      div.className = `line-label ${isWon ? 'won' : ''} ${isDead ? 'dead' : ''}`;
+      div.innerText = h.id;
+      ovLayout.appendChild(div);
+    });
+
+    for (let r = 0; r < 3; r++) {
+      const g = LINES_MAP[r];
+      const lbl = document.createElement('div');
+      const isDead = g.cells.some(i => state.cells[i]?.status === 'burned');
+      const isWon = g.cells.every(i => state.cells[i]?.status === 'done');
+      lbl.className = `line-label ${isWon ? 'won' : ''} ${isDead ? 'dead' : ''}`;
+      lbl.innerText = g.id;
+      ovLayout.appendChild(lbl);
+
+      for (let c = 0; c < 3; c++) {
+        const idx = r * 3 + c;
+        const cell = state.cells[idx];
+        const el = document.createElement('div');
+        el.className = `cell ${cell.status} ${cell.hardcore ? 'hardcore' : ''}`;
+        let foot = cell.status === 'clutch' ? formatTime(cell.timer) : (cell.status === 'done' ? '✅ ВЫПОЛНЕНО' : '');
+        el.innerHTML = `
+          <div class="cell-top"><span class="cell-num">#${cell.id}</span><span>${idx===2||idx===4||idx===6?'Д2':''}</span></div>
+          <div class="cell-task">${cell.task}</div>
+          <div class="cell-footer">${foot}</div>
+        `;
+        ovLayout.appendChild(el);
+      }
+    }
+
+    // 2. Рендер Хаба Модератора
+    document.getElementById('hubModeTitle').innerText = state.mode;
+    document.getElementById('hubAutoWinner').innerText = winTitle;
+
+    const hubGrid = document.getElementById('hubGrid');
+    hubGrid.innerHTML = '';
+    state.cells.forEach((cell, idx) => {
+      const card = document.createElement('div');
+      card.className = `hub-cell ${cell.status} ${cell.hardcore ? 'hardcore' : ''}`;
+      const statusBadge = cell.status === 'clutch' ? formatTime(cell.timer) : cell.status.toUpperCase();
+      card.innerHTML = `
+        <div class="hub-cell-head">
+          <span>Клетка #${cell.id}</span>
+          <span>${statusBadge}</span>
+        </div>
+        <div class="hub-cell-task">${cell.task}</div>
+        <div class="hub-cell-actions">
+          <button class="btn btn-sm btn-green" title="Засчитать / Снять" onclick="sendCmd('toggle', {idx: ${idx}})">✅</button>
+          <button class="btn btn-sm btn-amber" title="Запустить Клатч-таймер" onclick="sendCmd('clutch', {idx: ${idx}})">🔥</button>
+          <button class="btn btn-sm btn-red" title="Сжечь клетку" onclick="sendCmd('burn', {idx: ${idx}})">💀</button>
+          <button class="btn btn-sm" title="Заменить задание" onclick="editCellPrompt(${idx})">✏️</button>
+        </div>
+      `;
+      hubGrid.appendChild(card);
+    });
+
+    const outGrid = document.getElementById('outcomesGrid');
+    outGrid.innerHTML = '';
+    PREDICTION_OUTCOMES.forEach((title, i) => {
+      const btn = document.createElement('button');
+      btn.className = `outcome-btn ${i === winIdx ? 'recommended' : ''}`;
+      btn.innerHTML = `<span>${title}</span><span>${i === winIdx ? '👑' : '▶'}</span>`;
+      btn.onclick = () => sendCmd('resolve_pred', { winIdx: i });
+      outGrid.appendChild(btn);
+    });
+  }
+
+  // ================= СВЯЗЬ СО STREAMER.BOT И TWITCH POINTS =================
+  let sbSocket = null;
+  function connectStreamerBot() {
+    if (!IS_OVERLAY) return;
+    try {
+      sbSocket = new WebSocket('ws://127.0.0.1:8080/');
+    } catch (e) {}
+  }
+
+  function sendToStreamerBot(payload) {
+    if (sbSocket && sbSocket.readyState === WebSocket.OPEN) {
+      sbSocket.send(JSON.stringify({
+        request: 'DoAction',
+        id: 'fc27-bingo-hub',
+        action: { name: payload.action },
+        args: payload
+      }));
+    }
+  }
+
+  // Перехват Баллов канала Twitch (Клатч-вызов по номеру клетки)
+  if (IS_OVERLAY && TWITCH_CHANNEL) {
+    const tmiClient = new tmi.Client({ channels: [TWITCH_CHANNEL] });
+    tmiClient.connect().catch(() => {});
+    tmiClient.on('message', (channel, tags, message) => {
+      if (tags['custom-reward-id']) {
+        const num = parseInt(message.replace(/\D/g, ''), 10);
+        if (num >= 1 && num <= 9) handleCommand({ type: 'clutch', idx: num - 1 });
+      }
+    });
+  }
+
+  // Инициализация
+  handleCommand({ type: 'start', mode: '3 МАТЧА' });
+  connectCloudSync();
+  connectStreamerBot();
+</script>
+</body>
+</html>
